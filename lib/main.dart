@@ -1,13 +1,14 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const FinanceTrackerApp());
 }
 
 // ----------------------------------------------------
-// MODELO Y CATEGORÍAS
+// MODELOS DE DATOS
 // ----------------------------------------------------
 class ExpenseCategory {
   final String name;
@@ -51,64 +52,231 @@ class TransactionItem {
     required this.date,
     this.note = '',
   });
-}
 
-// ----------------------------------------------------
-// BASE DE DATOS / REPOSITORIO LOCAL
-// ----------------------------------------------------
-class FinanceDatabase {
-  static final List<TransactionItem> _db = [
-    TransactionItem(
-      id: '1',
-      title: 'Compra Mercadona',
-      amount: 45.30,
-      isIncome: false,
-      category: 'Comida / Super',
-      date: DateTime.now(),
-      note: 'Compra del día',
-    ),
-    TransactionItem(
-      id: '2',
-      title: 'Cena Restaurante',
-      amount: 26.50,
-      isIncome: false,
-      category: 'Ocio / Salidas',
-      date: DateTime.now().subtract(const Duration(days: 1)),
-      note: 'Con amigos',
-    ),
-    TransactionItem(
-      id: '3',
-      title: 'Nómina',
-      amount: 1850.00,
-      isIncome: true,
-      category: 'Nómina',
-      date: DateTime.now().subtract(const Duration(days: 3)),
-    ),
-    TransactionItem(
-      id: '4',
-      title: 'Gasolina Repsol',
-      amount: 60.00,
-      isIncome: false,
-      category: 'Transporte',
-      date: DateTime.now().subtract(const Duration(days: 5)),
-    ),
-  ];
-
-  static Future<List<TransactionItem>> getTransactions() async {
-    return List.from(_db);
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'title': title,
+      'amount': amount,
+      'isIncome': isIncome ? 1 : 0,
+      'category': category,
+      'date': date.toIso8601String(),
+      'note': note,
+    };
   }
 
-  static Future<void> insert(TransactionItem item) async {
-    _db.insert(0, item);
-  }
-
-  static Future<void> delete(String id) async {
-    _db.removeWhere((item) => item.id == id);
+  factory TransactionItem.fromMap(Map<String, dynamic> map) {
+    return TransactionItem(
+      id: map['id'],
+      title: map['title'],
+      amount: (map['amount'] as num).toDouble(),
+      isIncome: map['isIncome'] == 1,
+      category: map['category'],
+      date: DateTime.parse(map['date']),
+      note: map['note'] ?? '',
+    );
   }
 }
 
+class MandatoryBudget {
+  final String category;
+  final double amount;
+  final String frequency; // 'diario', 'semanal', 'mensual'
+
+  MandatoryBudget({
+    required this.category,
+    required this.amount,
+    required this.frequency,
+  });
+
+  double get monthlyEstimated {
+    if (frequency == 'diario') return amount * 30;
+    if (frequency == 'semanal') return amount * 4.33;
+    return amount;
+  }
+
+  Map<String, dynamic> toMap() => {
+        'category': category,
+        'amount': amount,
+        'frequency': frequency,
+      };
+
+  factory MandatoryBudget.fromMap(Map<String, dynamic> map) => MandatoryBudget(
+        category: map['category'],
+        amount: (map['amount'] as num).toDouble(),
+        frequency: map['frequency'],
+      );
+}
+
 // ----------------------------------------------------
-// APLICACIÓN PRINCIPAL CON 4 PESTAÑAS
+// PERSISTENCIA PERMANENTE MULTIUSUARIO
+// ----------------------------------------------------
+class StorageService {
+  static const _keyUsers = 'app_users';
+  static const _keyCurrentSession = 'app_current_session';
+
+  static Future<bool> registerUser(String email, String password, String name) async {
+    final prefs = await SharedPreferences.getInstance();
+    final usersRaw = prefs.getString(_keyUsers);
+    Map<String, dynamic> users = usersRaw != null ? jsonDecode(usersRaw) : {};
+
+    if (users.containsKey(email)) return false; // Usuario ya existe
+
+    users[email] = {
+      'name': name,
+      'password': password,
+      'transactions': [],
+      'budgets': [],
+    };
+
+    await prefs.setString(_keyUsers, jsonEncode(users));
+    await prefs.setString(_keyCurrentSession, email);
+    return true;
+  }
+
+  static Future<bool> loginUser(String email, String password) async {
+    final prefs = await SharedPreferences.getInstance();
+    final usersRaw = prefs.getString(_keyUsers);
+    if (usersRaw == null) return false;
+
+    Map<String, dynamic> users = jsonDecode(usersRaw);
+    if (users.containsKey(email) && users[email]['password'] == password) {
+      await prefs.setString(_keyCurrentSession, email);
+      return true;
+    }
+    return false;
+  }
+
+  static Future<String?> getCurrentSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_keyCurrentSession);
+  }
+
+  static Future<void> logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_keyCurrentSession);
+  }
+
+  static Future<String> getCurrentUserName() async {
+    final prefs = await SharedPreferences.getInstance();
+    final email = prefs.getString(_keyCurrentSession);
+    if (email == null) return 'Usuario';
+    final users = jsonDecode(prefs.getString(_keyUsers) ?? '{}');
+    return users[email]?['name'] ?? 'Usuario';
+  }
+
+  static Future<List<TransactionItem>> loadTransactions() async {
+    final prefs = await SharedPreferences.getInstance();
+    final email = prefs.getString(_keyCurrentSession);
+    if (email == null) return [];
+
+    final users = jsonDecode(prefs.getString(_keyUsers) ?? '{}');
+    final list = users[email]?['transactions'] as List? ?? [];
+    return list.map((item) => TransactionItem.fromMap(item)).toList();
+  }
+
+  static Future<void> saveTransactions(List<TransactionItem> list) async {
+    final prefs = await SharedPreferences.getInstance();
+    final email = prefs.getString(_keyCurrentSession);
+    if (email == null) return;
+
+    final users = jsonDecode(prefs.getString(_keyUsers) ?? '{}');
+    users[email]['transactions'] = list.map((t) => t.toMap()).toList();
+    await prefs.setString(_keyUsers, jsonEncode(users));
+  }
+
+  static Future<List<MandatoryBudget>> loadBudgets() async {
+    final prefs = await SharedPreferences.getInstance();
+    final email = prefs.getString(_keyCurrentSession);
+    if (email == null) return [];
+
+    final users = jsonDecode(prefs.getString(_keyUsers) ?? '{}');
+    final list = users[email]?['budgets'] as List? ?? [];
+    return list.map((item) => MandatoryBudget.fromMap(item)).toList();
+  }
+
+  static Future<void> saveBudgets(List<MandatoryBudget> list) async {
+    final prefs = await SharedPreferences.getInstance();
+    final email = prefs.getString(_keyCurrentSession);
+    if (email == null) return;
+
+    final users = jsonDecode(prefs.getString(_keyUsers) ?? '{}');
+    users[email]['budgets'] = list.map((b) => b.toMap()).toList();
+    await prefs.setString(_keyUsers, jsonEncode(users));
+  }
+}
+
+// ----------------------------------------------------
+// MOTOR PROPIO DE IA FINANCIERA (OFFLINE NLP / REGLAS)
+// ----------------------------------------------------
+class CustomFinancialAi {
+  static String processQuery({
+    required String query,
+    required List<TransactionItem> transactions,
+    required List<MandatoryBudget> budgets,
+  }) {
+    final text = query.toLowerCase();
+    final totalIncome = transactions.where((t) => t.isIncome).fold(0.0, (s, i) => s + i.amount);
+    final totalExpense = transactions.where((t) => !t.isIncome).fold(0.0, (s, i) => s + i.amount);
+    final balance = totalIncome - totalExpense;
+    final totalMandatory = budgets.fold(0.0, (s, b) => s + b.monthlyEstimated);
+
+    // Detección de intenciones y análisis de datos
+    if (text.contains('presupuesto') || text.contains('50/30/20') || text.contains('plan')) {
+      if (totalIncome == 0) {
+        return 'Para estructurar tu presupuesto con la regla 50/30/20, primero añade tus ingresos del mes.';
+      }
+      final needs = totalIncome * 0.50;
+      final wants = totalIncome * 0.30;
+      final savings = totalIncome * 0.20;
+
+      return '📊 **Plan 50/30/20 con tus ingresos (${totalIncome.toStringAsFixed(2)} €):**\n\n'
+          '• **50% Gastos Fijos / Necesidades:** ${needs.toStringAsFixed(2)} € (Tienes comprometidos ${totalMandatory.toStringAsFixed(2)} € en tu presupuesto obligatorio).\n'
+          '• **30% Gastos Personales / Ocio:** ${wants.toStringAsFixed(2)} €\n'
+          '• **20% Ahorro e Inversión:** ${savings.toStringAsFixed(2)} €\n\n'
+          '${totalMandatory > needs ? "⚠️ Alerta: Tus presupuestos obligatorios superan el 50% recomendado de tus ingresos." : "✅ Tus gastos fijos están dentro de un rango saludable."}';
+    }
+
+    if (text.contains('ahorrar') || text.contains('ahorro') || text.contains('reducir')) {
+      if (balance <= 0) {
+        return '⚠️ **Diagnóstico Urgente:** Tu balance actual está en déficit (${balance.toStringAsFixed(2)} €). Revisa los gastos discrecionales de ocio para recuperar liquidez inmediata.';
+      }
+      final potential = balance * 0.3;
+      return '💡 **Plan de Ahorro Inteligente:**\n\n'
+          '• Tu balance positivo actual es de **${balance.toStringAsFixed(2)} €**.\n'
+          '• Te recomiendo apartar de forma automática **${potential.toStringAsFixed(2)} €** a principios de mes.\n'
+          '• Tus gastos obligatorios configurados son **${totalMandatory.toStringAsFixed(2)} €/mes**. Tras cubrirlos, te queda un margen libre de **${(totalIncome - totalMandatory).clamp(0, double.infinity).toStringAsFixed(2)} €**.';
+    }
+
+    if (text.contains('gasto') || text.contains('categoría') || text.contains('en qué')) {
+      final Map<String, double> catSums = {};
+      for (var e in transactions.where((t) => !t.isIncome)) {
+        catSums[e.category] = (catSums[e.category] ?? 0.0) + e.amount;
+      }
+      if (catSums.isEmpty) return 'No tienes gastos registrados para analizar categorías.';
+
+      final sorted = catSums.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+      final top = sorted.first;
+
+      return '🔍 **Análisis de Categorías:**\n\n'
+          'Tu mayor foco de gasto es **${top.key}** con **${top.value.toStringAsFixed(2)} €** (${totalExpense > 0 ? ((top.value / totalExpense) * 100).toStringAsFixed(1) : 0}% del gasto total).\n\n'
+          'Total gastos acumulados: **${totalExpense.toStringAsFixed(2)} €**.';
+    }
+
+    if (text.contains('obligatorio') || text.contains('budget') || text.contains('fijo')) {
+      if (budgets.isEmpty) {
+        return 'Aún no has configurado presupuestos obligatorios. Pulsa el botón de presupuesto arriba a la derecha para añadir alquiler, comida o facturas.';
+      }
+      final list = budgets.map((b) => '• ${b.category}: ${b.amount.toStringAsFixed(2)} € (${b.frequency})').join('\n');
+      return '📋 **Tus Presupuestos Obligatorios:**\n\n$list\n\n**Total estimado al mes:** ${totalMandatory.toStringAsFixed(2)} €.';
+    }
+
+    return '🤖 **Asistente Financiero:** He analizado tu cuenta. Tienes un balance neto de **${balance.toStringAsFixed(2)} €**, ${transactions.length} transacciones y **${totalMandatory.toStringAsFixed(2)} €/mes** en presupuestos obligatorios. Puedes preguntarme:\n- "¿Cómo estructurar mi presupuesto?"\n- "¿En qué estoy gastando más?"\n- "¿Cuánto puedo ahorrar este mes?"';
+  }
+}
+
+// ----------------------------------------------------
+// APLICACIÓN PRINCIPAL
 // ----------------------------------------------------
 class FinanceTrackerApp extends StatelessWidget {
   const FinanceTrackerApp({super.key});
@@ -126,13 +294,210 @@ class FinanceTrackerApp extends StatelessWidget {
           surface: Color(0xFF161926),
         ),
       ),
-      home: const MainNavigationShell(),
+      home: const AuthWrapper(),
     );
   }
 }
 
+// Control de Sesión
+class AuthWrapper extends StatefulWidget {
+  const AuthWrapper({super.key});
+
+  @override
+  State<AuthWrapper> createState() => _AuthWrapperState();
+}
+
+class _AuthWrapperState extends State<AuthWrapper> {
+  bool _checking = true;
+  bool _loggedIn = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkAuth();
+  }
+
+  void _checkAuth() async {
+    final session = await StorageService.getCurrentSession();
+    setState(() {
+      _loggedIn = session != null;
+      _checking = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_checking) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (_loggedIn) {
+      return MainNavigationShell(onLogout: () => setState(() => _loggedIn = false));
+    }
+    return AuthScreen(onAuthSuccess: () => setState(() => _loggedIn = true));
+  }
+}
+
+// ----------------------------------------------------
+// PANTALLA DE LOGIN / REGISTRO
+// ----------------------------------------------------
+class AuthScreen extends StatefulWidget {
+  final VoidCallback onAuthSuccess;
+  const AuthScreen({super.key, required this.onAuthSuccess});
+
+  @override
+  State<AuthScreen> createState() => _AuthScreenState();
+}
+
+class _AuthScreenState extends State<AuthScreen> {
+  bool _isLogin = true;
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _nameController = TextEditingController();
+  String _error = '';
+
+  void _submit() async {
+    setState(() => _error = '');
+    final email = _emailController.text.trim().toLowerCase();
+    final pass = _passwordController.text.trim();
+    final name = _nameController.text.trim();
+
+    if (email.isEmpty || pass.isEmpty || (!_isLogin && name.isEmpty)) {
+      setState(() => _error = 'Por favor, rellena todos los campos.');
+      return;
+    }
+
+    if (_isLogin) {
+      final success = await StorageService.loginUser(email, pass);
+      if (success) {
+        widget.onAuthSuccess();
+      } else {
+        setState(() => _error = 'Correo o contraseña incorrectos.');
+      }
+    } else {
+      final success = await StorageService.registerUser(email, pass, name);
+      if (success) {
+        widget.onAuthSuccess();
+      } else {
+        setState(() => _error = 'Este correo ya está registrado.');
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 400),
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: const Color(0xFF161926),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: const Color(0xFF6C5CE7).withValues(alpha: 0.3)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.wallet_rounded, size: 50, color: Color(0xFF6C5CE7)),
+                const SizedBox(height: 10),
+                Text(
+                  _isLogin ? 'Bienvenido de nuevo' : 'Crear Cuenta',
+                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  _isLogin ? 'Inicia sesión para acceder a tus finanzas' : 'Regístrate para guardar tus datos en local',
+                  style: const TextStyle(color: Colors.grey, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 20),
+                if (_error.isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.redAccent.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(_error, style: const TextStyle(color: Colors.redAccent, fontSize: 13)),
+                  ),
+                if (!_isLogin) ...[
+                  TextField(
+                    controller: _nameController,
+                    decoration: InputDecoration(
+                      labelText: 'Nombre',
+                      prefixIcon: const Icon(Icons.person),
+                      filled: true,
+                      fillColor: const Color(0xFF0D0F17),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                TextField(
+                  controller: _emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: InputDecoration(
+                    labelText: 'Correo electrónico',
+                    prefixIcon: const Icon(Icons.email),
+                    filled: true,
+                    fillColor: const Color(0xFF0D0F17),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _passwordController,
+                  obscureText: true,
+                  decoration: InputDecoration(
+                    labelText: 'Contraseña',
+                    prefixIcon: const Icon(Icons.lock),
+                    filled: true,
+                    fillColor: const Color(0xFF0D0F17),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF6C5CE7),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                    onPressed: _submit,
+                    child: Text(
+                      _isLogin ? 'Iniciar Sesión' : 'Registrarse',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextButton(
+                  onPressed: () => setState(() => _isLogin = !_isLogin),
+                  child: Text(
+                    _isLogin ? '¿No tienes cuenta? Regístrate gratis' : '¿Ya tienes cuenta? Inicia sesión',
+                    style: const TextStyle(color: Color(0xFF00CEC9)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ----------------------------------------------------
+// SHELL PRINCIPAL CON NAVEGACIÓN Y PRESUPUESTO
+// ----------------------------------------------------
 class MainNavigationShell extends StatefulWidget {
-  const MainNavigationShell({super.key});
+  final VoidCallback onLogout;
+  const MainNavigationShell({super.key, required this.onLogout});
 
   @override
   State<MainNavigationShell> createState() => _MainNavigationShellState();
@@ -141,34 +506,59 @@ class MainNavigationShell extends StatefulWidget {
 class _MainNavigationShellState extends State<MainNavigationShell> {
   int _currentIndex = 0;
   List<TransactionItem> _transactions = [];
+  List<MandatoryBudget> _budgets = [];
+  String _userName = '';
   bool _isLoading = true;
-  String _geminiApiKey = ''; // Clave de Gemini
 
   @override
   void initState() {
     super.initState();
-    _loadData();
+    _loadAllData();
   }
 
-  Future<void> _loadData() async {
-    final list = await FinanceDatabase.getTransactions();
+  Future<void> _loadAllData() async {
+    final tList = await StorageService.loadTransactions();
+    final bList = await StorageService.loadBudgets();
+    final name = await StorageService.getCurrentUserName();
     setState(() {
-      _transactions = list;
+      _transactions = tList;
+      _budgets = bList;
+      _userName = name;
       _isLoading = false;
     });
   }
 
   void _addTransaction(TransactionItem item) async {
-    await FinanceDatabase.insert(item);
-    await _loadData();
+    final updated = [item, ..._transactions];
+    await StorageService.saveTransactions(updated);
+    setState(() => _transactions = updated);
   }
 
   void _deleteTransaction(String id) async {
-    await FinanceDatabase.delete(id);
-    await _loadData();
+    final updated = _transactions.where((t) => t.id != id).toList();
+    await StorageService.saveTransactions(updated);
+    setState(() => _transactions = updated);
   }
 
-  void _openAddTransactionModal(BuildContext context, {DateTime? initialDate}) {
+  void _saveBudgets(List<MandatoryBudget> list) async {
+    await StorageService.saveBudgets(list);
+    setState(() => _budgets = list);
+  }
+
+  void _openBudgetModal() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF161926),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => MandatoryBudgetModal(
+        initialBudgets: _budgets,
+        onSaveBudgets: _saveBudgets,
+      ),
+    );
+  }
+
+  void _openAddTransactionModal({DateTime? initialDate}) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -189,22 +579,25 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
 
     final screens = [
       HomeScreen(
+        userName: _userName,
         transactions: _transactions,
+        budgets: _budgets,
         onDelete: _deleteTransaction,
-        onAddRequested: () => _openAddTransactionModal(context),
+        onAddRequested: () => _openAddTransactionModal(),
+        onOpenBudget: _openBudgetModal,
         onOpenAi: () => setState(() => _currentIndex = 3),
+        onLogout: () async {
+          await StorageService.logout();
+          widget.onLogout();
+        },
       ),
       CalendarScreen(
         transactions: _transactions,
         onDelete: _deleteTransaction,
-        onAddForDate: (date) => _openAddTransactionModal(context, initialDate: date),
+        onAddForDate: (date) => _openAddTransactionModal(initialDate: date),
       ),
-      StatsScreen(transactions: _transactions),
-      AiChatScreen(
-        transactions: _transactions,
-        apiKey: _geminiApiKey,
-        onApiKeyChanged: (key) => setState(() => _geminiApiKey = key),
-      ),
+      StatsScreen(transactions: _transactions, budgets: _budgets),
+      AiChatScreen(transactions: _transactions, budgets: _budgets),
     ];
 
     return Scaffold(
@@ -215,32 +608,16 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
         indicatorColor: const Color(0xFF6C5CE7).withValues(alpha: 0.3),
         onDestinationSelected: (index) => setState(() => _currentIndex = index),
         destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.wallet_rounded),
-            selectedIcon: Icon(Icons.wallet_rounded, color: Color(0xFF6C5CE7)),
-            label: 'Billetera',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.calendar_month_rounded),
-            selectedIcon: Icon(Icons.calendar_month_rounded, color: Color(0xFF6C5CE7)),
-            label: 'Calendario',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.bar_chart_rounded),
-            selectedIcon: Icon(Icons.bar_chart_rounded, color: Color(0xFF00CEC9)),
-            label: 'Gráficos',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.auto_awesome_rounded),
-            selectedIcon: Icon(Icons.auto_awesome_rounded, color: Color(0xFF00CEC9)),
-            label: 'Gemini IA',
-          ),
+          NavigationDestination(icon: Icon(Icons.wallet_rounded), label: 'Billetera'),
+          NavigationDestination(icon: Icon(Icons.calendar_month_rounded), label: 'Calendario'),
+          NavigationDestination(icon: Icon(Icons.bar_chart_rounded), label: 'Gráficos'),
+          NavigationDestination(icon: Icon(Icons.psychology_rounded), label: 'Mi IA'),
         ],
       ),
       floatingActionButton: (_currentIndex == 0 || _currentIndex == 1)
           ? FloatingActionButton.extended(
               backgroundColor: const Color(0xFF6C5CE7),
-              onPressed: () => _openAddTransactionModal(context),
+              onPressed: () => _openAddTransactionModal(),
               icon: const Icon(Icons.add, color: Colors.white),
               label: const Text('Nuevo', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
             )
@@ -253,22 +630,31 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
 // 1. PANTALLA PRINCIPAL (HOME)
 // ----------------------------------------------------
 class HomeScreen extends StatelessWidget {
+  final String userName;
   final List<TransactionItem> transactions;
+  final List<MandatoryBudget> budgets;
   final Function(String) onDelete;
   final VoidCallback onAddRequested;
+  final VoidCallback onOpenBudget;
   final VoidCallback onOpenAi;
+  final VoidCallback onLogout;
 
   const HomeScreen({
     super.key,
+    required this.userName,
     required this.transactions,
+    required this.budgets,
     required this.onDelete,
     required this.onAddRequested,
+    required this.onOpenBudget,
     required this.onOpenAi,
+    required this.onLogout,
   });
 
-  double get _totalIncome => transactions.where((t) => t.isIncome).fold(0.0, (sum, i) => sum + i.amount);
-  double get _totalExpense => transactions.where((t) => !t.isIncome).fold(0.0, (sum, i) => sum + i.amount);
+  double get _totalIncome => transactions.where((t) => t.isIncome).fold(0.0, (s, i) => s + i.amount);
+  double get _totalExpense => transactions.where((t) => !t.isIncome).fold(0.0, (s, i) => s + i.amount);
   double get _totalBalance => _totalIncome - _totalExpense;
+  double get _totalMandatory => budgets.fold(0.0, (s, b) => s + b.monthlyEstimated);
 
   @override
   Widget build(BuildContext context) {
@@ -276,12 +662,23 @@ class HomeScreen extends StatelessWidget {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: const Text('Mi Billetera', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Hola, $userName 👋', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            const Text('Control Financiero', style: TextStyle(color: Colors.grey, fontSize: 12)),
+          ],
+        ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.auto_awesome, color: Color(0xFF00CEC9)),
-            tooltip: 'Chat Gemini IA',
-            onPressed: onOpenAi,
+            icon: const Icon(Icons.account_balance_wallet_outlined, color: Color(0xFF00CEC9)),
+            tooltip: 'Crear Presupuesto Obligatorio',
+            onPressed: onOpenBudget,
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout_rounded, color: Colors.redAccent),
+            tooltip: 'Cerrar Sesión',
+            onPressed: onLogout,
           ),
         ],
       ),
@@ -290,6 +687,7 @@ class HomeScreen extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Tarjeta de Balance
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(24),
@@ -328,29 +726,36 @@ class HomeScreen extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 18),
 
+            // Resumen de Presupuesto Obligatorio
             InkWell(
-              onTap: onOpenAi,
+              onTap: onOpenBudget,
               borderRadius: BorderRadius.circular(16),
               child: Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   color: const Color(0xFF161926),
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: const Color(0xFF6C5CE7).withValues(alpha: 0.3)),
+                  border: Border.all(color: const Color(0xFF00CEC9).withValues(alpha: 0.3)),
                 ),
-                child: const Row(
+                child: Row(
                   children: [
-                    Icon(Icons.auto_awesome, color: Color(0xFF00CEC9)),
-                    SizedBox(width: 12),
+                    const Icon(Icons.receipt_long_rounded, color: Color(0xFF00CEC9)),
+                    const SizedBox(width: 12),
                     Expanded(
-                      child: Text(
-                        'Gemini IA listo para analizar tus finanzas y darte recomendaciones.',
-                        style: TextStyle(fontSize: 13, color: Colors.white70),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('Gasto Obligatorio Mensual', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                          Text(
+                            '${_totalMandatory.toStringAsFixed(2)} €/mes (${budgets.length} categorías fijadas)',
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                          ),
+                        ],
                       ),
                     ),
-                    Icon(Icons.chevron_right, color: Colors.grey),
+                    const Icon(Icons.edit_note_rounded, color: Color(0xFF6C5CE7)),
                   ],
                 ),
               ),
@@ -360,7 +765,7 @@ class HomeScreen extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('Movimientos Recientes', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                const Text('Historial de Movimientos', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                 Text('${transactions.length} registros', style: const TextStyle(color: Color(0xFF6C5CE7), fontSize: 13)),
               ],
             ),
@@ -370,7 +775,7 @@ class HomeScreen extends StatelessWidget {
               const Center(
                 child: Padding(
                   padding: EdgeInsets.symmetric(vertical: 40),
-                  child: Text('No hay registros todavía.', style: TextStyle(color: Colors.grey)),
+                  child: Text('No hay registros todavía. Pulsa en Nuevo.', style: TextStyle(color: Colors.grey)),
                 ),
               )
             else
@@ -458,6 +863,215 @@ class HomeScreen extends StatelessWidget {
           ],
         ),
       ],
+    );
+  }
+}
+
+// ----------------------------------------------------
+// MODAL PARA FIJAR PRESUPUESTO OBLIGATORIO (BUDGET)
+// ----------------------------------------------------
+class MandatoryBudgetModal extends StatefulWidget {
+  final List<MandatoryBudget> initialBudgets;
+  final Function(List<MandatoryBudget>) onSaveBudgets;
+
+  const MandatoryBudgetModal({
+    super.key,
+    required this.initialBudgets,
+    required this.onSaveBudgets,
+  });
+
+  @override
+  State<MandatoryBudgetModal> createState() => _MandatoryBudgetModalState();
+}
+
+class _MandatoryBudgetModalState extends State<MandatoryBudgetModal> {
+  late List<MandatoryBudget> _tempBudgets;
+  String _selectedCategory = expenseCategories.first.name;
+  String _selectedFrequency = 'mensual';
+  final _amountController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _tempBudgets = List.from(widget.initialBudgets);
+  }
+
+  void _addOrUpdateBudget() {
+    final amount = double.tryParse(_amountController.text.replaceAll(',', '.')) ?? 0.0;
+    if (amount <= 0) return;
+
+    setState(() {
+      _tempBudgets.removeWhere((b) => b.category == _selectedCategory);
+      _tempBudgets.add(
+        MandatoryBudget(
+          category: _selectedCategory,
+          amount: amount,
+          frequency: _selectedFrequency,
+        ),
+      );
+      _amountController.clear();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final totalMonthly = _tempBudgets.fold(0.0, (s, b) => s + b.monthlyEstimated);
+
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        top: 20,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Presupuesto Obligatorio', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
+              ],
+            ),
+            const Text(
+              'Define el gasto fijo que necesitas obligatoriamente en cada categoría.',
+              style: TextStyle(color: Colors.grey, fontSize: 13),
+            ),
+            const SizedBox(height: 15),
+
+            // Selector de Categoría
+            DropdownButtonFormField<String>(
+              value: _selectedCategory,
+              decoration: InputDecoration(
+                labelText: 'Categoría',
+                filled: true,
+                fillColor: const Color(0xFF0D0F17),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+              ),
+              items: expenseCategories.map((cat) {
+                return DropdownMenuItem(
+                  value: cat.name,
+                  child: Row(
+                    children: [
+                      Icon(cat.icon, color: cat.color, size: 18),
+                      const SizedBox(width: 10),
+                      Text(cat.name),
+                    ],
+                  ),
+                );
+              }).toList(),
+              onChanged: (val) => setState(() => _selectedCategory = val!),
+            ),
+            const SizedBox(height: 12),
+
+            Row(
+              children: [
+                Expanded(
+                  flex: 3,
+                  child: TextField(
+                    controller: _amountController,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: InputDecoration(
+                      labelText: 'Importe (€)',
+                      filled: true,
+                      fillColor: const Color(0xFF0D0F17),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  flex: 2,
+                  child: DropdownButtonFormField<String>(
+                    value: _selectedFrequency,
+                    decoration: InputDecoration(
+                      labelText: 'Frecuencia',
+                      filled: true,
+                      fillColor: const Color(0xFF0D0F17),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'diario', child: Text('Diario')),
+                      DropdownMenuItem(value: 'semanal', child: Text('Semanal')),
+                      DropdownMenuItem(value: 'mensual', child: Text('Mensual')),
+                    ],
+                    onChanged: (val) => setState(() => _selectedFrequency = val!),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF00CEC9),
+                  side: const BorderSide(color: Color(0xFF00CEC9)),
+                ),
+                onPressed: _addOrUpdateBudget,
+                icon: const Icon(Icons.add),
+                label: const Text('Fijar esta Categoría'),
+              ),
+            ),
+            const Divider(height: 30, color: Colors.white10),
+
+            const Text('Categorías Obligatorias Fijadas', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+
+            if (_tempBudgets.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 10),
+                child: Text('No has fijado presupuestos obligatorios.', style: TextStyle(color: Colors.grey, fontSize: 13)),
+              )
+            else
+              ..._tempBudgets.map((b) {
+                return ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(b.category, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                  subtitle: Text('${b.amount.toStringAsFixed(2)} € / ${b.frequency} (≈ ${b.monthlyEstimated.toStringAsFixed(0)} €/mes)'),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                    onPressed: () => setState(() => _tempBudgets.remove(b)),
+                  ),
+                );
+              }),
+
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: const Color(0xFF0D0F17), borderRadius: BorderRadius.circular(12)),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text('Total Gasto Fijo Estimado:'),
+                  Text('${totalMonthly.toStringAsFixed(2)} €/mes', style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF00CEC9))),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            SizedBox(
+              width: double.infinity,
+              height: 48,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF6C5CE7),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+                onPressed: () {
+                  widget.onSaveBudgets(_tempBudgets);
+                  Navigator.pop(context);
+                },
+                child: const Text('Guardar Presupuesto', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -566,7 +1180,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Selector de Modo (Días, Semanas, Meses, Años)
             Container(
               decoration: BoxDecoration(
                 color: const Color(0xFF161926),
@@ -584,7 +1197,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
             ),
             const SizedBox(height: 15),
 
-            // Navegador de Período
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               decoration: BoxDecoration(
@@ -598,10 +1210,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                     icon: const Icon(Icons.chevron_left_rounded, color: Colors.white),
                     onPressed: () => _navigatePeriod(-1),
                   ),
-                  Text(
-                    _periodTitle,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                  ),
+                  Text(_periodTitle, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                   IconButton(
                     icon: const Icon(Icons.chevron_right_rounded, color: Colors.white),
                     onPressed: () => _navigatePeriod(1),
@@ -611,7 +1220,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
             ),
             const SizedBox(height: 20),
 
-            // Tarjeta de Resumen del Período
             Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
@@ -661,7 +1269,6 @@ class _CalendarScreenState extends State<CalendarScreen> {
             ),
             const SizedBox(height: 25),
 
-            // Lista de Movimientos Filtrados
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -796,8 +1403,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
 // ----------------------------------------------------
 class StatsScreen extends StatelessWidget {
   final List<TransactionItem> transactions;
+  final List<MandatoryBudget> budgets;
 
-  const StatsScreen({super.key, required this.transactions});
+  const StatsScreen({super.key, required this.transactions, required this.budgets});
 
   @override
   Widget build(BuildContext context) {
@@ -835,7 +1443,7 @@ class StatsScreen extends StatelessWidget {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('Tasa de Ahorro del Mes', style: TextStyle(fontSize: 14, color: Colors.white70)),
+                      const Text('Tasa de Ahorro Real', style: TextStyle(fontSize: 14, color: Colors.white70)),
                       Text('${savingsRate.toStringAsFixed(1)}%', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Color(0xFF00CEC9))),
                     ],
                   ),
@@ -852,7 +1460,7 @@ class StatsScreen extends StatelessWidget {
             ),
             const SizedBox(height: 25),
 
-            const Text('Distribución de Gastos', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const Text('Distribución de Gastos Reales', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 15),
 
             if (expenses.isEmpty)
@@ -915,7 +1523,7 @@ class StatsScreen extends StatelessWidget {
 }
 
 // ----------------------------------------------------
-// 4. CHAT CONECTADO A LA API REAL DE GEMINI
+// 4. CHAT CON LA IA PROPIA INTEGRADA
 // ----------------------------------------------------
 class ChatMessage {
   final String text;
@@ -927,15 +1535,9 @@ class ChatMessage {
 
 class AiChatScreen extends StatefulWidget {
   final List<TransactionItem> transactions;
-  final String apiKey;
-  final Function(String) onApiKeyChanged;
+  final List<MandatoryBudget> budgets;
 
-  const AiChatScreen({
-    super.key,
-    required this.transactions,
-    required this.apiKey,
-    required this.onApiKeyChanged,
-  });
+  const AiChatScreen({super.key, required this.transactions, required this.budgets});
 
   @override
   State<AiChatScreen> createState() => _AiChatScreenState();
@@ -951,21 +1553,16 @@ class _AiChatScreenState extends State<AiChatScreen> {
     super.initState();
     _messages.add(
       ChatMessage(
-        text: '¡Hola! Soy tu asistente financiero con Google Gemini. Conozco tu balance actual, ingresos y gastos registrados. Pregúntame sobre cómo optimizar tus presupuestos o ahorrar para tus metas.',
+        text: '¡Hola! Soy tu asistente financiero inteligente integrado. Conozco tu balance actual, tus gastos registrados y tus presupuestos obligatorios. Pregúntame sobre cómo optimizar tus ahorros o planificar tu presupuesto.',
         isUser: false,
         timestamp: DateTime.now(),
       ),
     );
   }
 
-  Future<void> _sendMessage() async {
+  void _sendMessage() {
     final userText = _controller.text.trim();
     if (userText.isEmpty) return;
-
-    if (widget.apiKey.isEmpty) {
-      _showApiKeyDialog(message: 'Introduce tu Gemini API Key para chatear con la IA.');
-      return;
-    }
 
     setState(() {
       _messages.add(ChatMessage(text: userText, isUser: true, timestamp: DateTime.now()));
@@ -973,123 +1570,19 @@ class _AiChatScreenState extends State<AiChatScreen> {
       _controller.clear();
     });
 
-    try {
-      // Contexto financiero inyectado en el prompt
-      final totalIncome = widget.transactions.where((t) => t.isIncome).fold(0.0, (s, i) => s + i.amount);
-      final totalExpense = widget.transactions.where((t) => !t.isIncome).fold(0.0, (s, i) => s + i.amount);
-      final balance = totalIncome - totalExpense;
-
-      final expensesBreakdown = widget.transactions
-          .where((t) => !t.isIncome)
-          .map((e) => '- ${e.title} (${e.category}): ${e.amount.toStringAsFixed(2)} €')
-          .join('\n');
-
-      final systemPrompt = '''
-Eres un asesor financiero personal experto, empático y motivador.
-Datos actuales del usuario:
-- Balance Total: ${balance.toStringAsFixed(2)} €
-- Total Ingresos: ${totalIncome.toStringAsFixed(2)} €
-- Total Gastos: ${totalExpense.toStringAsFixed(2)} €
-- Desglose de gastos recientes:
-$expensesBreakdown
-
-Responde en español de forma concisa, clara y accionable. Usa formato con viñetas cuando sea apropiado.
-Pregunta del usuario: $userText
-''';
-
-      final url = Uri.parse(
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${widget.apiKey}',
+    // Procesamiento con el motor de IA local
+    Future.delayed(const Duration(milliseconds: 600), () {
+      final response = CustomFinancialAi.processQuery(
+        query: userText,
+        transactions: widget.transactions,
+        budgets: widget.budgets,
       );
 
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'contents': [
-            {
-              'parts': [
-                {'text': systemPrompt}
-              ]
-            }
-          ]
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final aiText = data['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? 'No pude generar una respuesta.';
-        setState(() {
-          _messages.add(ChatMessage(text: aiText, isUser: false, timestamp: DateTime.now()));
-        });
-      } else {
-        setState(() {
-          _messages.add(
-            ChatMessage(
-              text: 'Error al conectar con Gemini (${response.statusCode}): Revisa si tu API Key es correcta.',
-              isUser: false,
-              timestamp: DateTime.now(),
-            ),
-          );
-        });
-      }
-    } catch (e) {
       setState(() {
-        _messages.add(
-          ChatMessage(text: 'Error de red: $e', isUser: false, timestamp: DateTime.now()),
-        );
-      });
-    } finally {
-      setState(() {
+        _messages.add(ChatMessage(text: response, isUser: false, timestamp: DateTime.now()));
         _isTyping = false;
       });
-    }
-  }
-
-  void _showApiKeyDialog({String? message}) {
-    final keyController = TextEditingController(text: widget.apiKey);
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF161926),
-        title: const Text('Configurar Gemini API Key'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (message != null) ...[
-              Text(message, style: const TextStyle(color: Colors.orangeAccent, fontSize: 13)),
-              const SizedBox(height: 10),
-            ],
-            const Text(
-              'Consigue tu clave gratuita en Google AI Studio (aistudio.google.com):',
-              style: TextStyle(fontSize: 13, color: Colors.grey),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: keyController,
-              decoration: const InputDecoration(
-                labelText: 'API Key (AIzaSy...)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancelar'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF6C5CE7)),
-            onPressed: () {
-              widget.onApiKeyChanged(keyController.text.trim());
-              Navigator.pop(ctx);
-            },
-            child: const Text('Guardar', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
+    });
   }
 
   @override
@@ -1098,44 +1591,16 @@ Pregunta del usuario: $userText
       appBar: AppBar(
         title: const Row(
           children: [
-            Icon(Icons.auto_awesome, color: Color(0xFF00CEC9), size: 20),
+            Icon(Icons.psychology_rounded, color: Color(0xFF00CEC9), size: 22),
             SizedBox(width: 8),
-            Text('Gemini AI Advisor', style: TextStyle(fontWeight: FontWeight.bold)),
+            Text('Mi IA Financiera', style: TextStyle(fontWeight: FontWeight.bold)),
           ],
         ),
         backgroundColor: Colors.transparent,
         elevation: 0,
-        actions: [
-          IconButton(
-            icon: Icon(
-              widget.apiKey.isEmpty ? Icons.key_off_rounded : Icons.key_rounded,
-              color: widget.apiKey.isEmpty ? Colors.orangeAccent : const Color(0xFF00CEC9),
-            ),
-            tooltip: 'Configurar Gemini API Key',
-            onPressed: _showApiKeyDialog,
-          ),
-        ],
       ),
       body: Column(
         children: [
-          if (widget.apiKey.isEmpty)
-            Container(
-              color: Colors.orange.withValues(alpha: 0.15),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Row(
-                children: [
-                  const Icon(Icons.info_outline, color: Colors.orangeAccent, size: 20),
-                  const SizedBox(width: 10),
-                  const Expanded(
-                    child: Text('Toca la llave arriba para configurar tu Gemini API Key.', style: TextStyle(fontSize: 12)),
-                  ),
-                  TextButton(
-                    onPressed: _showApiKeyDialog,
-                    child: const Text('Configurar', style: TextStyle(color: Color(0xFF00CEC9))),
-                  ),
-                ],
-              ),
-            ),
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.all(16),
@@ -1147,7 +1612,7 @@ Pregunta del usuario: $userText
                   child: Container(
                     margin: const EdgeInsets.only(bottom: 12),
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
+                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.80),
                     decoration: BoxDecoration(
                       color: msg.isUser ? const Color(0xFF6C5CE7) : const Color(0xFF161926),
                       borderRadius: BorderRadius.circular(16).copyWith(
@@ -1170,7 +1635,7 @@ Pregunta del usuario: $userText
                 children: [
                   SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
                   SizedBox(width: 8),
-                  Text('Gemini está analizando tus finanzas...', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                  Text('Analizando tus métricas financieras...', style: TextStyle(color: Colors.grey, fontSize: 12)),
                 ],
               ),
             ),
@@ -1184,7 +1649,7 @@ Pregunta del usuario: $userText
                     controller: _controller,
                     onSubmitted: (_) => _sendMessage(),
                     decoration: InputDecoration(
-                      hintText: 'Pregunta a Gemini (ej. ¿En qué gasto más?)...',
+                      hintText: 'Pregúntame (ej. ¿En qué gasto más? o ¿Cómo ahorro?)...',
                       hintStyle: const TextStyle(color: Colors.grey, fontSize: 13),
                       filled: true,
                       fillColor: const Color(0xFF0D0F17),
@@ -1212,7 +1677,7 @@ Pregunta del usuario: $userText
 }
 
 // ----------------------------------------------------
-// MODAL DE AÑADIR REGISTRO AVANZADO
+// MODAL DE AÑADIR REGISTRO
 // ----------------------------------------------------
 class AddTransactionModal extends StatefulWidget {
   final DateTime initialDate;
