@@ -944,7 +944,7 @@ class _MandatoryBudgetModalState extends State<MandatoryBudgetModal> {
 
             // Selector de Categoría
             DropdownButtonFormField<String>(
-              value: _selectedCategory,
+              initialValue: _selectedCategory,
               decoration: InputDecoration(
                 labelText: 'Categoría',
                 filled: true,
@@ -986,7 +986,7 @@ class _MandatoryBudgetModalState extends State<MandatoryBudgetModal> {
                 Expanded(
                   flex: 2,
                   child: DropdownButtonFormField<String>(
-                    value: _selectedFrequency,
+                    initialValue: _selectedFrequency,
                     decoration: InputDecoration(
                       labelText: 'Frecuencia',
                       filled: true,
@@ -1801,7 +1801,7 @@ class _AddTransactionModalState extends State<AddTransactionModal> {
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 itemCount: availableCategories.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                separatorBuilder: (_, _) => const SizedBox(width: 8),
                 itemBuilder: (ctx, idx) {
                   final cat = availableCategories[idx];
                   final isSelected = _selectedCategory == cat.name;
